@@ -2481,7 +2481,6 @@ class Tools:
                     {
                         "prompt": prompt,
                         "n": 1,
-                        "response_format": "url",
                     }
                 )
             else:
@@ -2508,7 +2507,6 @@ class Tools:
                     model=self.valves.image_gen_model,
                     prompt=prompt,
                     n=form_data.get("n", 1),
-                    response_format=form_data.get("response_format", "url"),
                 )
                 resp = response.model_dump() if hasattr(response, "model_dump") else response
             else:
