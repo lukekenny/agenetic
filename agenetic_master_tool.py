@@ -52,6 +52,7 @@ from open_webui.utils.chat import generate_chat_completion
 from open_webui.utils.files import get_image_url_from_base64
 from open_webui.models.users import Users
 from open_webui.utils.misc import get_last_user_message
+from open_webui.utils.middleware import chat_web_search_handler
 
 try:
     from exa_py import Exa
@@ -2173,6 +2174,10 @@ class Tools:
             default=2,
             description="Maximum research iterations in COMPLETE mode"
         )
+        web_search_use_exa: bool = Field(
+            default=True,
+            description="Use Exa for web search; disable to route to OpenWebUI's built-in web search handler."
+        )
         web_search_show_sources: bool = Field(
             default=False,
             description="Show sources in web search results"
@@ -2226,6 +2231,120 @@ class Tools:
             # Update debug instance - use web_search_debug OR master_debug
             self._web_search.debug = Debug(enabled=(self.valves.web_search_debug or self.valves.master_debug))
         return self._web_search
+
+    @staticmethod
+    async def _noop_event_emitter(_: dict) -> None:
+        """Fallback event emitter when OpenWebUI does not supply one."""
+        return None
+
+    def _normalize_user(self, user_like: Optional[Dict]) -> Optional[Any]:
+        """Return an object with attribute access even if we only have a dict."""
+        if user_like is None or hasattr(user_like, "id"):
+            return user_like
+
+        if isinstance(user_like, dict):
+            user_id = user_like.get("id")
+            if user_id is not None:
+                try:
+                    return Users.get_user_by_id(user_id)
+                except Exception:
+                    pass
+
+            class _UserShim:
+                def __init__(self, data: Dict[str, Any]):
+                    self.__dict__.update(data)
+
+            return _UserShim(user_like)
+
+        return user_like
+
+    def _summarize_web_search_files(
+        self,
+        files: List[Dict[str, Any]],
+        query: str,
+        requested_mode: str,
+    ) -> str:
+        """Convert OpenWebUI web_search files metadata into readable text."""
+        if not files:
+            return "OpenWebUI web search completed but no result files were returned."
+
+        mode_note = requested_mode.upper() if requested_mode else "AUTO"
+        summary_lines = [
+            f"OpenWebUI web search results for: {query}",
+            f"(Requested mode: {mode_note}. Exa-specific routing is bypassed in this mode.)",
+            "",
+        ]
+
+        for idx, file in enumerate(files, 1):
+            queries = file.get("queries") or []
+            header = f"Result set {idx}: " + (", ".join(queries) if queries else "(queries unavailable)")
+            summary_lines.append(header)
+
+            docs = file.get("docs") or []
+            urls = file.get("urls") or []
+            if docs:
+                for doc_idx, doc in enumerate(docs, 1):
+                    metadata = doc.get("metadata", {})
+                    title = metadata.get("title") or metadata.get("source") or f"Document {doc_idx}"
+                    source_url = metadata.get("source") or metadata.get("link")
+                    snippet = metadata.get("snippet") or doc.get("content", "")
+                    snippet = " ".join(snippet.strip().split())
+                    if snippet:
+                        snippet = snippet[:400] + ("..." if len(snippet) > 400 else "")
+                    line = f"- {title}"
+                    if source_url:
+                        line += f" ({source_url})"
+                    summary_lines.append(line)
+                    if snippet:
+                        summary_lines.append(f"  {snippet}")
+            elif urls:
+                summary_lines.append("Sources:")
+                for url in urls:
+                    summary_lines.append(f"- {url}")
+            else:
+                summary_lines.append("- No document content or URLs available.")
+
+            summary_lines.append("")
+
+        return "\n".join(summary_lines).strip()
+
+    async def _run_default_web_search(
+        self,
+        query: str,
+        mode: str,
+        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]],
+        __user__: Optional[Dict],
+        __request__: Optional[Any],
+        __messages__: Optional[List[Dict]],
+    ) -> str:
+        """Call OpenWebUI's built-in web search handler and format results."""
+        if __request__ is None:
+            return "OpenWebUI web search requires a request context; please retry inside a chat session."
+
+        event_emitter = __event_emitter__ or self._noop_event_emitter
+        messages = __messages__ or [{"role": "user", "content": query}]
+        model_id = self.valves.web_search_router_model or self.valves.web_search_quick_model
+
+        form_data = {
+            "model": model_id,
+            "messages": messages,
+        }
+
+        extra_params = {"__event_emitter__": event_emitter}
+        user_obj = self._normalize_user(__user__)
+
+        try:
+            handler_result = await chat_web_search_handler(
+                __request__,
+                form_data,
+                extra_params,
+                user_obj,
+            )
+        except Exception as exc:
+            return f"OpenWebUI web search failed: {exc}"
+
+        files = handler_result.get("files", [])
+        return self._summarize_web_search_files(files, query, mode)
 
     async def web_search(
         self,
@@ -2308,34 +2427,46 @@ class Tools:
             print(f"{self.debug._COLORS['DIM']}   web_search_router_model:{self.debug._COLORS['RESET']} {self.valves.web_search_router_model}", file=sys.stderr)
             print(f"{self.debug._COLORS['DIM']}   web_search_quick_model:{self.debug._COLORS['RESET']} {self.valves.web_search_quick_model}", file=sys.stderr)
             print(f"{self.debug._COLORS['DIM']}   web_search_quick_urls:{self.debug._COLORS['RESET']} {self.valves.web_search_quick_urls}", file=sys.stderr)
+            print(f"{self.debug._COLORS['DIM']}   web_search_use_exa:{self.debug._COLORS['RESET']} {self.valves.web_search_use_exa}", file=sys.stderr)
             print(f"{self.debug._COLORS['DIM']}   web_search_debug:{self.debug._COLORS['RESET']} {self.valves.web_search_debug}", file=sys.stderr)
-        
-        search_tool = self._get_web_search()
 
-        # Construct messages for the search tool
-        messages = __messages__ or []
-        if not messages:
-            messages = [{"role": "user", "content": query}]
+        if self.valves.web_search_use_exa:
+            search_tool = self._get_web_search()
 
-        # Override mode if specified
-        if mode.upper() in ["CRAWL", "STANDARD", "COMPLETE"]:
-            # Add mode override to system message
-            override_msg = {
-                "role": "system",
-                "content": f"[EXA_SEARCH_MODE] {mode.upper()}"
-            }
-            messages = [override_msg] + messages
+            messages = __messages__ or []
+            if not messages:
+                messages = [{"role": "user", "content": query}]
 
-        # Call the web search tool
-        result = await search_tool.routed_search(
-            query=query,
-            __event_emitter__=__event_emitter__,
-            __user__=__user__,
-            __request__=__request__,
-            __messages__=messages
-        )
+            if mode.upper() in ["CRAWL", "STANDARD", "COMPLETE"]:
+                override_msg = {
+                    "role": "system",
+                    "content": f"[EXA_SEARCH_MODE] {mode.upper()}"
+                }
+                messages = [override_msg] + messages
 
-        final_result = result.get("content", "No results found.")
+            result = await search_tool.routed_search(
+                query=query,
+                __event_emitter__=__event_emitter__,
+                __user__=__user__,
+                __request__=__request__,
+                __messages__=messages
+            )
+            final_result = result.get("content", "No results found.")
+        else:
+            if self.debug.enabled:
+                print(
+                    f"{self.debug._COLORS['YELLOW']}⚠️  Using OpenWebUI built-in web search handler (Exa disabled).{self.debug._COLORS['RESET']}",
+                    file=sys.stderr,
+                )
+            final_result = await self._run_default_web_search(
+                query,
+                mode,
+                __event_emitter__,
+                __user__,
+                __request__,
+                __messages__,
+            )
+            result = {"content": final_result, "source": "open_webui_web_search"}
 
         # Calculate execution time
         _tool_end_time = time.perf_counter()

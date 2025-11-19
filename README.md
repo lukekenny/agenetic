@@ -151,6 +151,7 @@ await image_generation(
 | `web_search_quick_urls` | 5 | URLs to fetch in STANDARD mode |
 | `web_search_quick_crawl` | 3 | URLs to read in STANDARD mode |
 | `web_search_complete_max_iterations` | 2 | Max research iterations in COMPLETE mode |
+| `web_search_use_exa` | true | Use Exa for web search. Disable to route to OpenWebUI's built-in search handler |
 | `web_search_show_sources` | false | Show source URLs in results |
 | `web_search_debug` | false | Enable detailed debug logging |
 
