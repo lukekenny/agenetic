@@ -2232,6 +2232,20 @@ class Tools:
             self._web_search.debug = Debug(enabled=(self.valves.web_search_debug or self.valves.master_debug))
         return self._web_search
 
+    def _can_use_exa_backend(self) -> Tuple[bool, Optional[str]]:
+        """Determine whether the Exa backend is usable for this invocation."""
+        if not self.valves.web_search_use_exa:
+            return False, None
+
+        if not EXA_AVAILABLE:
+            return False, "exa_py module not installed"
+
+        api_key = self.valves.exa_api_key or os.getenv("EXA_API_KEY")
+        if not api_key:
+            return False, "Exa API key missing"
+
+        return True, None
+
     @staticmethod
     async def _noop_event_emitter(_: dict) -> None:
         """Fallback event emitter when OpenWebUI does not supply one."""
@@ -2430,7 +2444,9 @@ class Tools:
             print(f"{self.debug._COLORS['DIM']}   web_search_use_exa:{self.debug._COLORS['RESET']} {self.valves.web_search_use_exa}", file=sys.stderr)
             print(f"{self.debug._COLORS['DIM']}   web_search_debug:{self.debug._COLORS['RESET']} {self.valves.web_search_debug}", file=sys.stderr)
 
-        if self.valves.web_search_use_exa:
+        use_exa_backend, fallback_reason = self._can_use_exa_backend()
+
+        if use_exa_backend:
             search_tool = self._get_web_search()
 
             messages = __messages__ or []
@@ -2453,12 +2469,35 @@ class Tools:
             )
             final_result = result.get("content", "No results found.")
         else:
+            if fallback_reason and __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Exa web search unavailable; falling back to OpenWebUI search.",
+                            "done": False,
+                        },
+                    }
+                )
+
             if self.debug.enabled:
+                notice = "Using OpenWebUI built-in web search handler"
+                if fallback_reason:
+                    notice += f" (reason: {fallback_reason})"
                 print(
-                    f"{self.debug._COLORS['YELLOW']}⚠️  Using OpenWebUI built-in web search handler (Exa disabled).{self.debug._COLORS['RESET']}",
+                    f"{self.debug._COLORS['YELLOW']}⚠️  {notice}.{self.debug._COLORS['RESET']}",
                     file=sys.stderr,
                 )
-            final_result = await self._run_default_web_search(
+
+            fallback_prefix = (
+                "ℹ️ Exa web search unavailable ("
+                f"{fallback_reason}"
+                "). Using OpenWebUI search instead.\n\n"
+                if fallback_reason
+                else ""
+            )
+
+            default_result = await self._run_default_web_search(
                 query,
                 mode,
                 __event_emitter__,
@@ -2466,6 +2505,7 @@ class Tools:
                 __request__,
                 __messages__,
             )
+            final_result = fallback_prefix + default_result
             result = {"content": final_result, "source": "open_webui_web_search"}
 
         # Calculate execution time
