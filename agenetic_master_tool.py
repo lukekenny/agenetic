@@ -2441,8 +2441,6 @@ class Tools:
             # Generate a short description from the prompt
             description = prompt[:50] + ("..." if len(prompt) > 50 else "")
 
-        placeholder_id = str(uuid4())
-
         if __event_emitter__:
             await __event_emitter__(
                 {
@@ -2455,6 +2453,32 @@ class Tools:
             )
 
         try:
+            # Prefer the documented image generation contract for GPT-Image-1
+            # (prompt-driven request) while keeping compatibility with
+            # chat-based image endpoints that still expect messages.
+            is_prompt_image_model = False
+            model_name = (self.valves.image_gen_model or "").lower()
+            for marker in ("gpt-image", "dall-e", "image"):
+                if marker in model_name:
+                    is_prompt_image_model = True
+                    break
+
+            form_data: Dict[str, Any] = {"model": self.valves.image_gen_model}
+            if is_prompt_image_model:
+                # Align with OpenAI Images API shape documented for GPT-Image-1
+                form_data.update(
+                    {
+                        "prompt": prompt,
+                        "n": 1,
+                        "response_format": "url",
+                    }
+                )
+            else:
+                # Fallback for providers that still route through chat
+                form_data.update(
+                    {"messages": [message_payload_dict], "stream": False}
+                )
+
             # Call the image generation model
             # OpenWebUI's generate_chat_completion expects message objects
             # with attribute access (message.role / message.content).
@@ -2485,13 +2509,7 @@ class Tools:
                     user_obj = _UserShim(__user__)
 
             resp = await generate_chat_completion(
-                request=__request__,
-                form_data={
-                    "model": self.valves.image_gen_model,
-                    "messages": [message_payload_dict],
-                    "stream": False,
-                },
-                user=user_obj,
+                request=__request__, form_data=form_data, user=user_obj
             )
 
             # Some OpenWebUI backends return a FastAPI/Starlette JSONResponse
@@ -2515,17 +2533,84 @@ class Tools:
                 )
 
             choices = resp.get("choices") or []
-            if not choices:
-                raise ValueError("Image generation response missing choices")
+            image_arrays = resp.get("data") or resp.get("images") or []
 
-            image_reply = (
-                choices[0].get("message", {}).get("content", "").strip()
-            )
-
-            # Extract URL from response
+            image_reply = ""
             url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-            url_match = re.search(url_pattern, image_reply)
-            image_url = url_match.group(0) if url_match else image_reply
+            url_match = None
+            image_url = None
+
+            # Helper to extract urls from structured chat content
+            def _extract_url_from_content(content: Any) -> Tuple[Optional[str], str]:
+                if content is None:
+                    return None, ""
+
+                if isinstance(content, str):
+                    match = re.search(url_pattern, content)
+                    return (match.group(0) if match else None, content.strip())
+
+                if isinstance(content, list):
+                    for part in content:
+                        url, text = _extract_url_from_content(part)
+                        if url:
+                            return url, text
+                        if text and not isinstance(part, dict):
+                            # Capture the first text snippet as a caption fallback
+                            return None, text
+                    return None, ""
+
+                if isinstance(content, dict):
+                    if content.get("type") == "image_url":
+                        image_url_obj = content.get("image_url") or {}
+                        url_value = image_url_obj.get("url") if isinstance(image_url_obj, dict) else None
+                        return url_value, ""
+                    if "url" in content:
+                        return content.get("url"), ""
+                    if "text" in content:
+                        text_val = content.get("text")
+                        if isinstance(text_val, dict):
+                            text_val = text_val.get("value") or ""
+                        return _extract_url_from_content(text_val)
+                    if "value" in content:
+                        return _extract_url_from_content(content.get("value"))
+                return None, ""
+
+            # Prefer chat-style responses when available
+            if choices:
+                choice_message = choices[0].get("message", {})
+                content = choice_message.get("content", "")
+                image_url, image_reply = _extract_url_from_content(content)
+                if image_reply:
+                    image_reply = image_reply.strip()
+                if image_url:
+                    url_match = re.search(url_pattern, image_url)
+
+            # Fallback for image API style responses (e.g., OpenAI Images)
+            if image_url is None and image_arrays:
+                first_image = image_arrays[0] or {}
+                image_url = first_image.get("url")
+
+                if not image_url:
+                    b64_data = first_image.get("b64_json")
+                    if b64_data:
+                        image_url = f"data:image/png;base64,{b64_data}"
+
+                if not image_reply:
+                    image_reply = (
+                        first_image.get("revised_prompt")
+                        or first_image.get("prompt")
+                        or ""
+                    )
+
+            if url_match is None and image_url:
+                url_match = re.search(url_pattern, image_url)
+
+            if image_url is None:
+                available_keys = list(resp.keys())
+                raise ValueError(
+                    "Image generation response missing image data; keys present: "
+                    f"{available_keys}"
+                )
 
             if __event_emitter__:
                 await __event_emitter__(
@@ -2535,8 +2620,11 @@ class Tools:
                     }
                 )
 
+            # Use the most descriptive caption available
+            final_caption = description or image_reply or prompt
+
             # Return markdown-formatted image
-            result = f"![{description}]({image_url})\n\n*{description}*"
+            result = f"![{final_caption}]({image_url})\n\n*{final_caption}*"
 
             # Calculate execution time
             _tool_end_time = time.perf_counter()
