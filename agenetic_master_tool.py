@@ -49,6 +49,7 @@ class SimpleChatMessage(BaseModel):
     content: Any
 
 from open_webui.utils.chat import generate_chat_completion
+from open_webui.utils.files import get_image_url_from_base64
 from open_webui.models.users import Users
 from open_webui.utils.misc import get_last_user_message
 
@@ -2447,6 +2448,20 @@ class Tools:
             # Generate a short description from the prompt
             description = prompt[:50] + ("..." if len(prompt) > 50 else "")
 
+        # Normalize the user object for downstream OpenWebUI utilities. This
+        # matches the attribute-access shim OpenWebUI itself uses when a plain
+        # dict is provided instead of a Users instance.
+        user_obj = __user__
+        if isinstance(__user__, dict):
+            try:
+                user_obj = Users.get_user_by_id(__user__.get("id"))
+            except Exception:
+                class _UserShim:
+                    def __init__(self, data):
+                        self.__dict__.update(data)
+
+                user_obj = _UserShim(__user__)
+
         if __event_emitter__:
             await __event_emitter__(
                 {
@@ -2510,31 +2525,6 @@ class Tools:
                 )
                 resp = response.model_dump() if hasattr(response, "model_dump") else response
             else:
-                # OpenWebUI's generate_chat_completion expects message objects
-                # with attribute access (message.role / message.content).
-                # Using a Pydantic model avoids "'dict' object has no attribute 'role'" errors
-                # seen when image models are configured.
-                # Use a Pydantic model for attribute access while ensuring the
-                # payload is converted to a plain dict for JSON serialization.
-                # Passing the BaseModel instance directly can trigger "Object of
-                # type SimpleChatMessage is not JSON serializable" errors when the
-                # OpenWebUI backend attempts to serialize the request body.
-                # Normalize the user object to ensure attribute access works inside
-                # generate_chat_completion. Some environments pass __user__ as a
-                # plain dict, which can trigger "'dict' object has no attribute
-                # 'role'" errors. Try to resolve it to an actual Users instance; as
-                # a fallback, wrap the dict in a simple attribute-access shim.
-                user_obj = __user__
-                if isinstance(__user__, dict):
-                    try:
-                        user_obj = Users.get_user_by_id(__user__.get("id"))
-                    except Exception:
-                        class _UserShim:
-                            def __init__(self, data):
-                                self.__dict__.update(data)
-
-                        user_obj = _UserShim(__user__)
-
                 resp = await generate_chat_completion(
                     request=__request__, form_data=form_data, user=user_obj
                 )
@@ -2635,6 +2625,7 @@ class Tools:
             if image_url is None and image_arrays:
                 first_image = image_arrays[0] or {}
                 image_url = first_image.get("url")
+                b64_data = None
 
                 if not image_url:
                     b64_data = first_image.get("b64_json")
@@ -2657,6 +2648,31 @@ class Tools:
                     "Image generation response missing image data; keys present: "
                     f"{available_keys}"
                 )
+
+            # If the provider returned base64 data, persist it via OpenWebUI's
+            # upload pipeline to avoid injecting massive data URIs into the chat
+            # history. This mirrors OpenWebUI's own middleware behavior for
+            # code-interpreter outputs.
+            if image_url.startswith("data:image") and __request__:
+                try:
+                    metadata = {
+                        "source": "agentic_master_tool.image_generation",
+                        "model": self.valves.image_gen_model,
+                        "prompt": prompt,
+                        "description": description,
+                    }
+                    uploaded_image_url = get_image_url_from_base64(
+                        __request__, image_url, metadata, user_obj
+                    )
+                    if uploaded_image_url:
+                        image_url = uploaded_image_url
+                        url_match = re.search(url_pattern, image_url)
+                except Exception as upload_error:
+                    if self.debug.enabled:
+                        print(
+                            f"{self.debug._COLORS['YELLOW']}⚠️  Failed to upload base64 image to OpenWebUI storage: {upload_error}{self.debug._COLORS['RESET']}",
+                            file=sys.stderr,
+                        )
 
             if __event_emitter__:
                 await __event_emitter__(
