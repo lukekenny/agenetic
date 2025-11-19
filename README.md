@@ -53,51 +53,9 @@ await web_search(
 - `query` (str, required): Search query or URL to process
 - `mode` (str, optional): "AUTO", "CRAWL", "STANDARD", or "COMPLETE" (default: "AUTO")
 
-### 2. Code Interpreter (`code_interpreter`)
+> **Note:** Code interpreter is controlled globally in OpenWebUI (Admin → Settings → Features). The Agentic Master Tool cannot toggle it because the necessary feature flags live outside the tool sandbox. Make sure it is enabled at the platform level if you need Python execution.
 
-Enable Python/Jupyter code execution in the conversation.
-
-**Modes:**
-- Jupyter notebook environment (full featured, recommended)
-- Basic Python execution (lightweight)
-
-**Usage:**
-```python
-# Enable Jupyter notebook environment
-await code_interpreter(
-    enable=True,
-    use_jupyter=True
-)
-
-# Enable basic Python execution
-await code_interpreter(
-    enable=True,
-    use_jupyter=False
-)
-```
-
-**After enabling**, the model can execute Python code:
-```xml
-<code_interpreter type="code" lang="python">
-import matplotlib.pyplot as plt
-import numpy as np
-
-x = np.linspace(0, 10, 100)
-y = np.sin(x)
-
-plt.figure(figsize=(10, 6))
-plt.plot(x, y)
-plt.title("Sine Wave")
-plt.savefig("sine_wave.png")
-print("Plot saved!")
-</code_interpreter>
-```
-
-**Parameters:**
-- `enable` (bool, optional): Whether to enable code interpreter (default: True)
-- `use_jupyter` (bool, optional): Use Jupyter (True) or basic Python (False). If None, uses valve setting.
-
-### 3. Image Generation (`image_generation`)
+### 2. Image Generation (`image_generation`)
 
 Generate images from text descriptions.
 
@@ -155,12 +113,6 @@ await image_generation(
 | `web_search_show_sources` | false | Show source URLs in results |
 | `web_search_debug` | false | Enable detailed debug logging |
 
-### Code Interpreter Settings
-
-| Valve | Default | Description |
-|-------|---------|-------------|
-| `code_interpreter_use_jupyter` | true | Use Jupyter (true) or basic Python (false) |
-
 ### Image Generation Settings
 
 | Valve | Default | Description |
@@ -181,26 +133,7 @@ AI: I'll help you research quantum computing developments. Let me do a comprehen
 Based on my research across multiple sources, here are the key developments in quantum computing...
 ```
 
-### Example 2: Data Analysis
-
-```
-User: Can you analyze this CSV file and create visualizations?
-
-AI: I'll enable the code interpreter to analyze your data.
-
-[Calls code_interpreter with use_jupyter=True]
-
-Now I can process your CSV. Please upload it, and I'll create visualizations using Python.
-
-<code_interpreter type="code" lang="python">
-import pandas as pd
-import matplotlib.pyplot as plt
-
-# Your data analysis code here
-</code_interpreter>
-```
-
-### Example 3: Content Creation
+### Example 2: Content Creation
 
 ```
 User: Create an image of a futuristic city and find articles about urban planning
@@ -237,13 +170,7 @@ The model can call multiple tools in sequence:
 # 1. Research the topic
 await web_search(query="machine learning best practices", mode="STANDARD")
 
-# 2. Enable code interpreter
-await code_interpreter(enable=True)
-
-# 3. Generate example code based on research
-# <code_interpreter>...</code_interpreter>
-
-# 4. Create a diagram
+# 2. Create a diagram
 await image_generation(prompt="diagram showing ML workflow")
 ```
 

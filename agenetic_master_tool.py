@@ -2907,6 +2907,49 @@ class Tools:
 
             return error_msg
 
+    async def code_interpreter(
+        self,
+        enable: bool = True,
+        use_jupyter: Optional[bool] = None,
+        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
+        __user__: Optional[Dict] = None,
+        __request__: Optional[Any] = None,
+    ) -> str:
+        """Inform callers that the code interpreter must be enabled globally."""
+
+        # Keep master-level debugging consistent
+        self.debug.enabled = self.valves.master_debug
+
+        message = (
+            "Code interpreter cannot be toggled from this tool. "
+            "Enable it from OpenWebUI Admin → Settings → Features and then "
+            "send your Python inside <code_interpreter> tags."
+        )
+
+        if not enable:
+            message = (
+                "Code interpreter stays managed at the platform level. "
+                "If you need to disable it, use the OpenWebUI Admin settings."
+            )
+
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": message, "done": True},
+                }
+            )
+
+        if self.debug.enabled:
+            print(
+                f"{self.debug._COLORS['YELLOW']}⚠️  code_interpreter() called, "
+                "but feature must be managed via OpenWebUI settings."
+                f"{self.debug._COLORS['RESET']}",
+                file=sys.stderr,
+            )
+
+        return message
+
 
 # For backward compatibility, export the main class
 __all__ = ["Tools"]
