@@ -36,6 +36,17 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+
+class SimpleChatMessage(BaseModel):
+    """
+    Lightweight chat message model to satisfy OpenWebUI's expectation
+    for objects with attribute-style access (message.role/message.content)
+    when calling generate_chat_completion.
+    """
+
+    role: str
+    content: Any
+
 from open_webui.utils.chat import generate_chat_completion
 from open_webui.models.users import Users
 from open_webui.utils.misc import get_last_user_message
@@ -2445,11 +2456,17 @@ class Tools:
 
         try:
             # Call the image generation model
+            # OpenWebUI's generate_chat_completion expects message objects
+            # with attribute access (message.role / message.content).
+            # Using a Pydantic model avoids "'dict' object has no attribute 'role'" errors
+            # seen when image models are configured.
+            message_payload = SimpleChatMessage(role="user", content=prompt)
+
             resp = await generate_chat_completion(
                 request=__request__,
                 form_data={
                     "model": self.valves.image_gen_model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [message_payload],
                     "stream": False,
                 },
                 user=__user__,
