@@ -2493,7 +2493,34 @@ class Tools:
                 },
                 user=user_obj,
             )
-            image_reply = resp["choices"][0]["message"]["content"].strip()
+
+            # Some OpenWebUI backends return a FastAPI/Starlette JSONResponse
+            # object rather than a plain dict. Normalize the response so we
+            # can reliably access the message payload.
+            if not isinstance(resp, dict):
+                if hasattr(resp, "body"):
+                    try:
+                        resp = json.loads(resp.body)
+                    except Exception:
+                        pass
+                elif hasattr(resp, "json"):
+                    try:
+                        resp = resp.json()
+                    except Exception:
+                        pass
+
+            if not isinstance(resp, dict):
+                raise TypeError(
+                    f"Unexpected response type from generate_chat_completion: {type(resp)}"
+                )
+
+            choices = resp.get("choices") or []
+            if not choices:
+                raise ValueError("Image generation response missing choices")
+
+            image_reply = (
+                choices[0].get("message", {}).get("content", "").strip()
+            )
 
             # Extract URL from response
             url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
