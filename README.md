@@ -138,9 +138,11 @@ Blocked modules defined through the `CODE_INTERPRETER_BLOCKED_MODULES` environme
 | `web_search_quick_urls` | 5 | URLs to fetch in STANDARD mode |
 | `web_search_quick_crawl` | 3 | URLs to read in STANDARD mode |
 | `web_search_complete_max_iterations` | 2 | Max research iterations in COMPLETE mode |
-| `web_search_use_exa` | true | Use Exa for web search. Disable to route to OpenWebUI's built-in search handler |
+| `web_search_use_exa` | true | Use Exa for web search (automatically falls back to OpenWebUI's built-in handler when Exa isn't available) |
 | `web_search_show_sources` | false | Show source URLs in results |
 | `web_search_debug` | false | Enable detailed debug logging |
+
+> ℹ️ **Automatic fallback:** Even when `web_search_use_exa` is enabled, the tool now transparently routes searches through OpenWebUI's built-in handler whenever `exa_py` isn't installed or an Exa API key is missing. The UI receives a status update explaining the fallback so you always know which backend handled the request.
 
 ### Image Generation Settings
 
