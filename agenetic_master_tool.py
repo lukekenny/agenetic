@@ -2909,46 +2909,198 @@ class Tools:
 
     async def code_interpreter(
         self,
+        code: Optional[str] = None,
         enable: bool = True,
         use_jupyter: Optional[bool] = None,
+        timeout_seconds: int = 120,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
         __user__: Optional[Dict] = None,
         __request__: Optional[Any] = None,
     ) -> str:
-        """Inform callers that the code interpreter must be enabled globally."""
+        """Execute Python code when the platform allows code interpretation."""
 
         # Keep master-level debugging consistent
         self.debug.enabled = self.valves.master_debug
 
-        message = (
-            "Code interpreter cannot be toggled from this tool. "
-            "Enable it from OpenWebUI Admin → Settings → Features and then "
-            "send your Python inside <code_interpreter> tags."
+        def _bool_from_env(*names: str, default: Optional[bool] = None) -> Optional[bool]:
+            for env_name in names:
+                value = os.getenv(env_name)
+                if value is not None:
+                    return value.strip().lower() in {"1", "true", "yes", "on"}
+            return default
+
+        def _resolve_feature_flag(
+            request: Optional[Any],
+            attr_name: str,
+            env_names: Tuple[str, ...],
+            default: bool,
+        ) -> bool:
+            # Prefer the actively running OpenWebUI config, fall back to env vars.
+            if request is not None:
+                try:
+                    config = getattr(getattr(request, "app", None), "state", None)
+                    config = getattr(config, "config", None)
+                    if config is not None and hasattr(config, attr_name):
+                        return bool(getattr(config, attr_name))
+                except Exception:
+                    # Ignore attribute errors – fall back to env detection
+                    pass
+            env_value = _bool_from_env(*env_names)
+            if env_value is not None:
+                return env_value
+            return default
+
+        code_execution_enabled = _resolve_feature_flag(
+            __request__, "ENABLE_CODE_EXECUTION", ("ENABLE_CODE_EXECUTION",), True
+        )
+        code_interpreter_enabled = _resolve_feature_flag(
+            __request__, "ENABLE_CODE_INTERPRETER", ("ENABLE_CODE_INTERPRETER",), True
         )
 
-        if not enable:
-            message = (
-                "Code interpreter stays managed at the platform level. "
-                "If you need to disable it, use the OpenWebUI Admin settings."
-            )
+        async def _emit_status(description: str, done: bool = False) -> None:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": description, "done": done},
+                    }
+                )
 
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {"description": message, "done": True},
-                }
-            )
+        feature_summary = (
+            "Code Execution: "
+            f"{'enabled' if code_execution_enabled else 'disabled'} | Code Interpreter: "
+            f"{'enabled' if code_interpreter_enabled else 'disabled'}"
+        )
 
         if self.debug.enabled:
             print(
-                f"{self.debug._COLORS['YELLOW']}⚠️  code_interpreter() called, "
-                "but feature must be managed via OpenWebUI settings."
-                f"{self.debug._COLORS['RESET']}",
+                f"{self.debug._COLORS['BLUE']}ℹ️  {feature_summary}{self.debug._COLORS['RESET']}",
                 file=sys.stderr,
             )
 
-        return message
+        if not enable:
+            message = (
+                "Code interpreter invocation skipped because `enable` was set to False. "
+                "Use enable=True when you are ready to execute code."
+            )
+            await _emit_status(message, done=True)
+            return message
+
+        if not (code_execution_enabled and code_interpreter_enabled):
+            message = (
+                "Code execution is disabled in the current OpenWebUI configuration. "
+                "Enable both Code Execution and Code Interpreter from Admin → Settings → Features."
+            )
+            await _emit_status(message, done=True)
+            return message
+
+        if not code or not code.strip():
+            message = (
+                "Code interpreter is ready. Provide Python code via the `code` argument or "
+                "inside <code_interpreter>...</code_interpreter> tags so it can be executed."
+            )
+            await _emit_status(message, done=True)
+            return message
+
+        trimmed_code = code.strip()
+        blocked_modules = [
+            module.strip()
+            for module in os.getenv("CODE_INTERPRETER_BLOCKED_MODULES", "").split(",")
+            if module.strip()
+        ]
+        if blocked_modules:
+            for module in blocked_modules:
+                pattern = rf"\b(import|from)\s+{re.escape(module)}\b"
+                if re.search(pattern, trimmed_code):
+                    message = (
+                        "Code execution blocked: the module "
+                        f"`{module}` is disallowed by CODE_INTERPRETER_BLOCKED_MODULES."
+                    )
+                    await _emit_status(message, done=True)
+                    return message
+
+        if use_jupyter:
+            jupyter_note = (
+                "Jupyter-specific execution is not available inside the Agentic Master Tool; "
+                "running code with the local Python interpreter instead."
+            )
+            await _emit_status(jupyter_note)
+            if self.debug.enabled:
+                print(
+                    f"{self.debug._COLORS['YELLOW']}⚠️  {jupyter_note}{self.debug._COLORS['RESET']}",
+                    file=sys.stderr,
+                )
+
+        python_exec = sys.executable or "python3"
+        timeout_seconds = max(1, int(timeout_seconds or 60))
+
+        await _emit_status("Running Python code block…")
+
+        process = await asyncio.create_subprocess_exec(
+            python_exec,
+            "-c",
+            trimmed_code,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            timeout_message = (
+                f"Code execution timed out after {timeout_seconds} seconds and was terminated."
+            )
+            await _emit_status(timeout_message, done=True)
+            return timeout_message
+
+        stdout_text = stdout_bytes.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+
+        def _trim_output(text: str, label: str) -> str:
+            max_chars = 4000
+            if len(text) > max_chars:
+                if self.debug.enabled:
+                    print(
+                        f"{self.debug._COLORS['YELLOW']}⚠️  Truncating {label} to {max_chars} characters.{self.debug._COLORS['RESET']}",
+                        file=sys.stderr,
+                    )
+                return text[: max_chars - 3] + "..."
+            return text
+
+        if stdout_text:
+            stdout_text = _trim_output(stdout_text, "stdout")
+        if stderr_text:
+            stderr_text = _trim_output(stderr_text, "stderr")
+
+        result_parts = [
+            f"`{python_exec}` exited with code {process.returncode}.",
+        ]
+        if stdout_text:
+            result_parts.append(f"**Stdout**\n```\n{stdout_text}\n```")
+        if stderr_text:
+            result_parts.append(f"**Stderr**\n```\n{stderr_text}\n```")
+        if not stdout_text and not stderr_text:
+            result_parts.append("_Code ran successfully with no output._")
+
+        if process.returncode != 0:
+            result_parts.append(
+                "⚠️  The interpreter returned a non-zero exit code. Review stderr for details."
+            )
+
+        final_message = "\n\n".join(result_parts)
+        await _emit_status("Code execution complete.", done=True)
+
+        if self.debug.enabled:
+            print(
+                f"{self.debug._COLORS['GREEN']}✅  Code interpreter completed (exit {process.returncode}).{self.debug._COLORS['RESET']}",
+                file=sys.stderr,
+            )
+
+        return final_message
 
 
 # For backward compatibility, export the main class

@@ -53,7 +53,7 @@ await web_search(
 - `query` (str, required): Search query or URL to process
 - `mode` (str, optional): "AUTO", "CRAWL", "STANDARD", or "COMPLETE" (default: "AUTO")
 
-> **Note:** Code interpreter is controlled globally in OpenWebUI (Admin → Settings → Features). The Agentic Master Tool cannot toggle it because the necessary feature flags live outside the tool sandbox. Make sure it is enabled at the platform level if you need Python execution.
+> **Note:** Code execution still respects the global OpenWebUI feature flags. Make sure Code Execution **and** Code Interpreter are enabled in Admin → Settings → Features so the tool can run Python locally.
 
 ### 2. Image Generation (`image_generation`)
 
@@ -76,6 +76,35 @@ await image_generation(
 **Parameters:**
 - `prompt` (str, required): Detailed description of the image to generate
 - `description` (str, optional): Short caption/title for the image
+
+### 3. Code Interpreter (`code_interpreter`)
+
+Execute Python directly from the master tool. The method checks the active OpenWebUI configuration (via the incoming request or environment variables) before launching a sandboxed Python process.
+
+**Usage:**
+```python
+# Run a quick calculation
+await code_interpreter(code="print(sum(i*i for i in range(10)))")
+
+# Provide longer blocks and increase the timeout if necessary
+await code_interpreter(
+    code="""
+import statistics as stats
+data = [3, 5, 9, 11]
+print('mean', stats.mean(data))
+print('stdev', stats.pstdev(data))
+""",
+    timeout_seconds=30,
+)
+```
+
+**Parameters:**
+- `code` (str, optional): Python source to execute. When omitted the tool simply reports whether the environment is ready.
+- `enable` (bool, optional): Skip execution when `False`.
+- `use_jupyter` (bool, optional): Requests the Jupyter backend. The tool currently falls back to the local interpreter and emits a status note when this flag is set.
+- `timeout_seconds` (int, optional): Maximum wall-clock time for the process (default: 120 seconds).
+
+Blocked modules defined through the `CODE_INTERPRETER_BLOCKED_MODULES` environment variable are respected—if the submitted code imports a forbidden module the tool aborts early with a descriptive error message.
 
 ## Installation
 
