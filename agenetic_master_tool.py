@@ -2460,7 +2460,13 @@ class Tools:
             # with attribute access (message.role / message.content).
             # Using a Pydantic model avoids "'dict' object has no attribute 'role'" errors
             # seen when image models are configured.
+            # Use a Pydantic model for attribute access while ensuring the
+            # payload is converted to a plain dict for JSON serialization.
+            # Passing the BaseModel instance directly can trigger "Object of
+            # type SimpleChatMessage is not JSON serializable" errors when the
+            # OpenWebUI backend attempts to serialize the request body.
             message_payload = SimpleChatMessage(role="user", content=prompt)
+            message_payload_dict = message_payload.model_dump()
 
             # Normalize the user object to ensure attribute access works inside
             # generate_chat_completion. Some environments pass __user__ as a
@@ -2482,7 +2488,7 @@ class Tools:
                 request=__request__,
                 form_data={
                     "model": self.valves.image_gen_model,
-                    "messages": [message_payload],
+                    "messages": [message_payload_dict],
                     "stream": False,
                 },
                 user=user_obj,
