@@ -2462,6 +2462,22 @@ class Tools:
             # seen when image models are configured.
             message_payload = SimpleChatMessage(role="user", content=prompt)
 
+            # Normalize the user object to ensure attribute access works inside
+            # generate_chat_completion. Some environments pass __user__ as a
+            # plain dict, which can trigger "'dict' object has no attribute
+            # 'role'" errors. Try to resolve it to an actual Users instance; as
+            # a fallback, wrap the dict in a simple attribute-access shim.
+            user_obj = __user__
+            if isinstance(__user__, dict):
+                try:
+                    user_obj = Users.get_user_by_id(__user__.get("id"))
+                except Exception:
+                    class _UserShim:
+                        def __init__(self, data):
+                            self.__dict__.update(data)
+
+                    user_obj = _UserShim(__user__)
+
             resp = await generate_chat_completion(
                 request=__request__,
                 form_data={
@@ -2469,7 +2485,7 @@ class Tools:
                     "messages": [message_payload],
                     "stream": False,
                 },
-                user=__user__,
+                user=user_obj,
             )
             image_reply = resp["choices"][0]["message"]["content"].strip()
 
