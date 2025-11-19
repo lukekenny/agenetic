@@ -2463,6 +2463,11 @@ class Tools:
                     is_prompt_image_model = True
                     break
 
+            # Prepare a chat-style payload in advance so it can be reused for
+            # providers that expect messages rather than a simple prompt.
+            message_payload = SimpleChatMessage(role="user", content=prompt)
+            message_payload_dict = message_payload.model_dump()
+
             form_data: Dict[str, Any] = {"model": self.valves.image_gen_model}
             if is_prompt_image_model:
                 # Align with OpenAI Images API shape documented for GPT-Image-1
@@ -2489,9 +2494,6 @@ class Tools:
             # Passing the BaseModel instance directly can trigger "Object of
             # type SimpleChatMessage is not JSON serializable" errors when the
             # OpenWebUI backend attempts to serialize the request body.
-            message_payload = SimpleChatMessage(role="user", content=prompt)
-            message_payload_dict = message_payload.model_dump()
-
             # Normalize the user object to ensure attribute access works inside
             # generate_chat_completion. Some environments pass __user__ as a
             # plain dict, which can trigger "'dict' object has no attribute
@@ -2531,6 +2533,25 @@ class Tools:
                 raise TypeError(
                     f"Unexpected response type from generate_chat_completion: {type(resp)}"
                 )
+
+            # Surface upstream image generation errors immediately so users get
+            # actionable feedback instead of a generic "missing image data"
+            # message. Most providers return an "error" envelope with helpful
+            # details.
+            if "error" in resp:
+                error_obj = resp.get("error") or {}
+                if isinstance(error_obj, dict):
+                    error_message = error_obj.get("message") or error_obj.get("error")
+                    error_type = error_obj.get("type") or error_obj.get("code")
+                    details = error_obj.get("details")
+                    components = [part for part in [error_type, error_message, details] if part]
+                    raise ValueError(
+                        "Image generation provider returned an error: "
+                        + " | ".join(components)
+                        if components
+                        else "Image generation provider returned an error"
+                    )
+                raise ValueError(f"Image generation provider returned an error: {error_obj}")
 
             choices = resp.get("choices") or []
             image_arrays = resp.get("data") or resp.get("images") or []
