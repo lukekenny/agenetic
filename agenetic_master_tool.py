@@ -35,6 +35,7 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from openai import OpenAI
 
 
 class SimpleChatMessage(BaseModel):
@@ -2189,7 +2190,12 @@ class Tools:
         # ─── Image Generation Configuration ───
         image_gen_model: str = Field(
             default="gpt-4o-image",
-            description="Model to use for image generation (e.g., gpt-4o-image, flux)"
+            description=(
+                "Model to use for image generation. Use GPT-Image models like "
+                "gpt-image-1 or gpt-4o-image for the OpenAI Images API; use a "
+                "chat/responses model like gpt-5.1 when relying on the "
+                "responses/chat-completions tool path."
+            )
         )
 
     def __init__(self):
@@ -2453,15 +2459,15 @@ class Tools:
             )
 
         try:
-            # Prefer the documented image generation contract for GPT-Image-1
-            # (prompt-driven request) while keeping compatibility with
-            # chat-based image endpoints that still expect messages.
-            is_prompt_image_model = False
+            # Decide whether to call the OpenAI Images API (prompt-driven) or
+            # the responses/chat tool path (messages-based). GPT-Image models
+            # like gpt-image-1/gpt-4o-image should be used with the Images API,
+            # while responses/chat should use a standard chat model (e.g.,
+            # gpt-5.1) that supports the image generation tool.
             model_name = (self.valves.image_gen_model or "").lower()
-            for marker in ("gpt-image", "dall-e", "image"):
-                if marker in model_name:
-                    is_prompt_image_model = True
-                    break
+            using_images_api = any(
+                marker in model_name for marker in ("gpt-image", "dall-e", "-image")
+            )
 
             # Prepare a chat-style payload in advance so it can be reused for
             # providers that expect messages rather than a simple prompt.
@@ -2469,7 +2475,7 @@ class Tools:
             message_payload_dict = message_payload.model_dump()
 
             form_data: Dict[str, Any] = {"model": self.valves.image_gen_model}
-            if is_prompt_image_model:
+            if using_images_api:
                 # Align with OpenAI Images API shape documented for GPT-Image-1
                 form_data.update(
                     {
@@ -2479,40 +2485,61 @@ class Tools:
                     }
                 )
             else:
-                # Fallback for providers that still route through chat
+                # Fallback for providers that still route through chat/responses
+                # (e.g., gpt-5.1 with the image generation tool enabled).
                 form_data.update(
                     {"messages": [message_payload_dict], "stream": False}
                 )
 
-            # Call the image generation model
-            # OpenWebUI's generate_chat_completion expects message objects
-            # with attribute access (message.role / message.content).
-            # Using a Pydantic model avoids "'dict' object has no attribute 'role'" errors
-            # seen when image models are configured.
-            # Use a Pydantic model for attribute access while ensuring the
-            # payload is converted to a plain dict for JSON serialization.
-            # Passing the BaseModel instance directly can trigger "Object of
-            # type SimpleChatMessage is not JSON serializable" errors when the
-            # OpenWebUI backend attempts to serialize the request body.
-            # Normalize the user object to ensure attribute access works inside
-            # generate_chat_completion. Some environments pass __user__ as a
-            # plain dict, which can trigger "'dict' object has no attribute
-            # 'role'" errors. Try to resolve it to an actual Users instance; as
-            # a fallback, wrap the dict in a simple attribute-access shim.
-            user_obj = __user__
-            if isinstance(__user__, dict):
-                try:
-                    user_obj = Users.get_user_by_id(__user__.get("id"))
-                except Exception:
-                    class _UserShim:
-                        def __init__(self, data):
-                            self.__dict__.update(data)
+            # Call the image generation model. For OpenAI's GPT-Image family,
+            # use the dedicated Images API instead of chat completions to avoid
+            # the "only supported in v1/responses" error. For the responses/chat
+            # path, expect a non-image chat model (e.g., gpt-5.1) so the tool is
+            # available.
+            if using_images_api:
+                api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_APIKEY")
+                if not api_key:
+                    raise ValueError(
+                        "OPENAI_API_KEY is required for gpt-image models but was not found in the environment"
+                    )
 
-                    user_obj = _UserShim(__user__)
+                client = OpenAI(api_key=api_key)
+                response = client.images.generate(
+                    model=self.valves.image_gen_model,
+                    prompt=prompt,
+                    n=form_data.get("n", 1),
+                    response_format=form_data.get("response_format", "url"),
+                )
+                resp = response.model_dump() if hasattr(response, "model_dump") else response
+            else:
+                # OpenWebUI's generate_chat_completion expects message objects
+                # with attribute access (message.role / message.content).
+                # Using a Pydantic model avoids "'dict' object has no attribute 'role'" errors
+                # seen when image models are configured.
+                # Use a Pydantic model for attribute access while ensuring the
+                # payload is converted to a plain dict for JSON serialization.
+                # Passing the BaseModel instance directly can trigger "Object of
+                # type SimpleChatMessage is not JSON serializable" errors when the
+                # OpenWebUI backend attempts to serialize the request body.
+                # Normalize the user object to ensure attribute access works inside
+                # generate_chat_completion. Some environments pass __user__ as a
+                # plain dict, which can trigger "'dict' object has no attribute
+                # 'role'" errors. Try to resolve it to an actual Users instance; as
+                # a fallback, wrap the dict in a simple attribute-access shim.
+                user_obj = __user__
+                if isinstance(__user__, dict):
+                    try:
+                        user_obj = Users.get_user_by_id(__user__.get("id"))
+                    except Exception:
+                        class _UserShim:
+                            def __init__(self, data):
+                                self.__dict__.update(data)
 
-            resp = await generate_chat_completion(
-                request=__request__, form_data=form_data, user=user_obj
-            )
+                        user_obj = _UserShim(__user__)
+
+                resp = await generate_chat_completion(
+                    request=__request__, form_data=form_data, user=user_obj
+                )
 
             # Some OpenWebUI backends return a FastAPI/Starlette JSONResponse
             # object rather than a plain dict. Normalize the response so we
@@ -2531,7 +2558,7 @@ class Tools:
 
             if not isinstance(resp, dict):
                 raise TypeError(
-                    f"Unexpected response type from generate_chat_completion: {type(resp)}"
+                    f"Unexpected response type from image generation provider: {type(resp)}"
                 )
 
             # Surface upstream image generation errors immediately so users get
